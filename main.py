@@ -1,18 +1,27 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import joblib
+import requests
+import os
 
-import osmnx as ox
-import networkx as nx
+from dotenv import load_dotenv
+# =========================================================
+# LOAD ENV
+# =========================================================
+load_dotenv()
+ORS_API_KEY = os.getenv("ORS_API_KEY")
+
+if ORS_API_KEY is None:
+    raise RuntimeError("ORS_API_KEY not found in environment variables")
 
 # =========================================================
 # APP
 # =========================================================
 app = FastAPI(
-    title="Smart Traffic Route Optimization (Real Map)",
-    version="4.1"
+    title="Smart Traffic Route Optimization (OpenRouteService)",
+    version="5.0"
 )
 
 # =========================================================
@@ -23,19 +32,13 @@ scaler = joblib.load("scaler.pkl")
 feature_names = joblib.load("feature_names.pkl")
 
 # =========================================================
-# GLOBAL GRAPH (LAZY LOADED)
-# =========================================================
-ROAD_GRAPH = None
-CITY_NAME = "Chennai, India"
-
-# =========================================================
 # TRAFFIC MULTIPLIERS
 # =========================================================
 TRAFFIC_WEIGHT = {
-    0: 1.0,
-    1: 1.3,
-    2: 1.6,
-    3: 2.0
+    0: 1.0,   # Low
+    1: 1.3,   # Medium
+    2: 1.6,   # High
+    3: 2.0    # Heavy
 }
 
 # =========================================================
@@ -61,24 +64,10 @@ class RawSensorInput(BaseModel):
     dest_lon: float
 
 # =========================================================
-# LOAD GRAPH (ON DEMAND)
-# =========================================================
-def get_graph():
-    global ROAD_GRAPH
-    if ROAD_GRAPH is None:
-        print("Loading real city road network...")
-        ROAD_GRAPH = ox.graph_from_place(
-            CITY_NAME,
-            network_type="drive",
-            simplify=True
-        )
-        print("Road network loaded")
-    return ROAD_GRAPH
-
-# =========================================================
 # FEATURE ENGINEERING
 # =========================================================
 def engineer_features(raw: RawSensorInput):
+
     df = pd.DataFrame([{
         "speed(km/h)": raw.speed,
         "Ax(m/s2)": raw.Ax,
@@ -97,11 +86,15 @@ def engineer_features(raw: RawSensorInput):
     }])
 
     df["acc_magnitude"] = np.sqrt(
-        df["Ax(m/s2)"]**2 + df["Ay(m/s2)"]**2 + df["Az(m/s2)"]**2
+        df["Ax(m/s2)"]**2 +
+        df["Ay(m/s2)"]**2 +
+        df["Az(m/s2)"]**2
     )
 
     df["gyro_magnitude"] = np.sqrt(
-        df["Gx(rad/s)"]**2 + df["Gy(rad/s)"]**2 + df["Gz(rad/s)"]**2
+        df["Gx(rad/s)"]**2 +
+        df["Gy(rad/s)"]**2 +
+        df["Gz(rad/s)"]**2
     )
 
     df["speed_distance_ratio"] = (
@@ -115,63 +108,75 @@ def engineer_features(raw: RawSensorInput):
     return df[feature_names]
 
 # =========================================================
+# ORS ROUTING
+# =========================================================
+import polyline
+import requests
+
+def get_route_from_ors(src_lat, src_lon, dst_lat, dst_lon):
+    url = "https://api.openrouteservice.org/v2/directions/driving-car"
+
+    headers = {
+        "Authorization": ORS_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "coordinates": [
+            [src_lon, src_lat],
+            [dst_lon, dst_lat]
+        ]
+    }
+
+    response = requests.post(url, json=payload, headers=headers, timeout=20)
+
+    print("ORS STATUS:", response.status_code)
+
+    data = response.json()
+    print("ORS RAW RESPONSE:", data)
+
+    route = data["routes"][0]
+
+    coords = polyline.decode(route["geometry"])
+    distance_km = route["summary"]["distance"] / 1000
+    duration_min = route["summary"]["duration"] / 60
+
+    return coords, distance_km, duration_min
+
+# =========================================================
 # API ENDPOINT
 # =========================================================
 @app.post("/optimized_route")
 def optimized_route(data: RawSensorInput):
+    try:
+        # ---- ML Traffic Prediction ----
+        features = engineer_features(data)
+        scaled = scaler.transform(features)
 
-    # ---- ML Traffic Prediction ----
-    features = engineer_features(data)
-    scaled = scaler.transform(features)
+        probs = model.predict_proba(scaled)[0]
+        traffic_status = int(np.argmax(probs))
+        confidence = round(float(np.max(probs)) * 100, 2)
 
-    probs = model.predict_proba(scaled)[0]
-    traffic_status = int(np.argmax(probs))
-    confidence = round(float(np.max(probs)) * 100, 2)
+        traffic_multiplier = TRAFFIC_WEIGHT[traffic_status]
 
-    traffic_multiplier = TRAFFIC_WEIGHT[traffic_status]
+        # ---- ORS Route ----
+        polyline_coords, distance_km, base_eta = get_route_from_ors(
+            data.source_lat,
+            data.source_lon,
+            data.dest_lat,
+            data.dest_lon
+        )
 
-    # ---- Load Graph ----
-    graph = get_graph()
+        eta_minutes = round(base_eta * traffic_multiplier, 2)
 
-    # ---- Nearest Nodes ----
-    source_node = ox.nearest_nodes(
-        graph, data.source_lon, data.source_lat
-    )
-    dest_node = ox.nearest_nodes(
-        graph, data.dest_lon, data.dest_lat
-    )
+        return {
+            "traffic_status": traffic_status,
+            "confidence_percent": confidence,
+            "total_distance_km": round(distance_km, 2),
+            "eta_minutes": eta_minutes,
+            "route_polyline": polyline_coords
+        }
 
-    # ---- Shortest Path (Dijkstra) ----
-    path_nodes = nx.shortest_path(
-        graph,
-        source_node,
-        dest_node,
-        weight="length"
-    )
-
-    # ---- Path Polyline ----
-    polyline = [
-        (graph.nodes[n]["y"], graph.nodes[n]["x"])
-        for n in path_nodes
-    ]
-
-    # ---- Distance ----
-    total_distance_km = sum(
-        graph.edges[path_nodes[i], path_nodes[i+1], 0]["length"]
-        for i in range(len(path_nodes) - 1)
-    ) / 1000
-
-    # ---- ETA ----
-    eta_minutes = round(
-        (total_distance_km / max(data.speed, 5)) *
-        traffic_multiplier * 60,
-        2
-    )
-
-    return {
-        "traffic_status": traffic_status,
-        "confidence_percent": confidence,
-        "total_distance_km": round(total_distance_km, 2),
-        "eta_minutes": eta_minutes,
-        "route_polyline": polyline
-    }
+    except Exception as e:
+        print("🔥 BACKEND CRASH:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))

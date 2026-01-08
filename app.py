@@ -18,7 +18,7 @@ st.set_page_config(
 # =========================================================
 st.title("🚦 Smart Traffic Route Optimization")
 st.caption(
-    "Real-time traffic-aware routing using Machine Learning + OpenStreetMap"
+    "ML-based traffic prediction + real-time route optimization using OpenRouteService"
 )
 
 st.divider()
@@ -26,7 +26,7 @@ st.divider()
 # =========================================================
 # SIDEBAR – ROUTE INPUT
 # =========================================================
-st.sidebar.header("🛣️ Route Input")
+st.sidebar.header("🛣️ Route Selection")
 
 source_lat = st.sidebar.number_input(
     "Source Latitude", value=13.0827, format="%.6f"
@@ -44,6 +44,9 @@ dest_lon = st.sidebar.number_input(
 
 st.sidebar.divider()
 
+# =========================================================
+# VEHICLE & ENVIRONMENT
+# =========================================================
 st.sidebar.header("🚗 Vehicle & Environment")
 
 speed = st.sidebar.slider("Speed (km/h)", 5, 100, 30)
@@ -59,7 +62,7 @@ Ax, Ay, Az = 0.4, 0.5, 0.6
 Gx, Gy, Gz = 0.2, 0.2, 0.1
 
 # =========================================================
-# API CALL FUNCTION
+# API CALL
 # =========================================================
 def call_api():
     payload = {
@@ -81,54 +84,68 @@ def call_api():
         "dest_lon": dest_lon
     }
 
-    response = requests.post(API_URL, json=payload, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(API_URL, json=payload, timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return None
+
+# =========================================================
+# TRAFFIC LABEL
+# =========================================================
+def traffic_label(code: int) -> str:
+    return {
+        0: "Low Traffic",
+        1: "Medium Traffic",
+        2: "High Traffic",
+        3: "Heavy Traffic"
+    }.get(code, "Unknown")
 
 # =========================================================
 # ACTION BUTTON
 # =========================================================
 if st.button("🚀 Find Optimized Route"):
 
-    with st.spinner("Computing optimal route on real city map..."):
+    with st.spinner("Computing optimized route using OpenRouteService..."):
         result = call_api()
+
+    if result is None:
+        st.stop()
 
     st.divider()
 
     # =====================================================
     # METRICS
     # =====================================================
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("Traffic Level", result["traffic_status"])
+    c1.metric("Traffic Condition", traffic_label(result["traffic_status"]))
     c2.metric("Confidence", f"{result['confidence_percent']} %")
     c3.metric("ETA", f"{result['eta_minutes']} min")
-
-    st.metric(
-        "Total Distance",
-        f"{result['total_distance_km']} km"
-    )
+    c4.metric("Distance", f"{result['total_distance_km']} km")
 
     # =====================================================
     # MAP VISUALIZATION
     # =====================================================
-    st.subheader("🗺️ Optimized Route (Real Roads)")
+    st.subheader("🗺️ Optimized Route (Real City Roads)")
 
     polyline = result["route_polyline"]
 
-    # Map centered at source
+    # Center map at source
     m = folium.Map(
         location=polyline[0],
         zoom_start=14,
         control_scale=True
     )
 
-    # Route polyline
+    # Draw route
     folium.PolyLine(
         polyline,
         color="blue",
         weight=6,
-        opacity=0.9,
+        opacity=0.85,
         tooltip="Optimized Route"
     ).add_to(m)
 
@@ -156,7 +173,7 @@ if st.button("🚀 Find Optimized Route"):
     st_folium(m, width=1000, height=550)
 
     # =====================================================
-    # RAW OUTPUT (OPTIONAL – FOR DEBUG / VIVA)
+    # DEBUG / VIVA VIEW
     # =====================================================
     with st.expander("🔍 API Response (Debug / Viva)"):
         st.json(result)
@@ -165,5 +182,5 @@ if st.button("🚀 Find Optimized Route"):
 # FOOTER
 # =========================================================
 st.caption(
-    "Built using FastAPI, Streamlit, OpenStreetMap (OSMnx), and Machine Learning"
+    "FastAPI · Streamlit · OpenRouteService · Machine Learning"
 )
