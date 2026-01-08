@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import folium
 from streamlit_folium import st_folium
-import time
 
 # =========================================================
 # CONFIG
@@ -10,86 +9,57 @@ import time
 API_URL = "http://127.0.0.1:8000/optimized_route"
 
 st.set_page_config(
-    page_title="Smart Traffic Management System",
+    page_title="Smart Traffic Route Optimization",
     layout="wide"
 )
 
 # =========================================================
-# TITLE
+# HEADER
 # =========================================================
-st.title("🚦 Smart Traffic Management System")
-st.write(
-    "Traffic-aware route optimization using Machine Learning + Dijkstra’s Algorithm"
+st.title("🚦 Smart Traffic Route Optimization")
+st.caption(
+    "Real-time traffic-aware routing using Machine Learning + OpenStreetMap"
 )
 
 st.divider()
 
 # =========================================================
-# SIDEBAR – SIMULATION SETTINGS
+# SIDEBAR – ROUTE INPUT
 # =========================================================
-st.sidebar.header("⏱️ Simulation Settings")
+st.sidebar.header("🛣️ Route Input")
 
-simulate = st.sidebar.toggle("Enable Simulation", value=False)
-
-refresh_rate = st.sidebar.slider(
-    "Refresh interval (seconds)",
-    min_value=3,
-    max_value=10,
-    value=5
+source_lat = st.sidebar.number_input(
+    "Source Latitude", value=13.0827, format="%.6f"
+)
+source_lon = st.sidebar.number_input(
+    "Source Longitude", value=80.2707, format="%.6f"
 )
 
-traffic_mode = st.sidebar.selectbox(
-    "Traffic Scenario",
-    ["Low Traffic", "Medium Traffic", "Heavy Traffic"]
+dest_lat = st.sidebar.number_input(
+    "Destination Latitude", value=13.0950, format="%.6f"
+)
+dest_lon = st.sidebar.number_input(
+    "Destination Longitude", value=80.2650, format="%.6f"
 )
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("🛣️ **Route Selection**")
+st.sidebar.divider()
 
-source = st.sidebar.selectbox("Source Node", ["A", "B", "C", "D", "E"])
-destination = st.sidebar.selectbox("Destination Node", ["A", "B", "C", "D", "E"])
+st.sidebar.header("🚗 Vehicle & Environment")
 
-# =========================================================
-# SIMULATION PRESETS
-# =========================================================
-if traffic_mode == "Low Traffic":
-    preset_speed = 60.0
-    preset_front_distance = 35.0
-    preset_jerk = 0.05
-elif traffic_mode == "Medium Traffic":
-    preset_speed = 30.0
-    preset_front_distance = 12.0
-    preset_jerk = 0.25
-else:
-    preset_speed = 5.0
-    preset_front_distance = 2.0
-    preset_jerk = 0.9
+speed = st.sidebar.slider("Speed (km/h)", 5, 100, 30)
+front_distance = st.sidebar.slider("Front Distance (m)", 1, 50, 10)
+back_distance = st.sidebar.slider("Back Distance (m)", 1, 50, 8)
+jerk = st.sidebar.slider("Jerk", 0.0, 1.5, 0.3)
+
+temperature = st.sidebar.slider("Temperature (°C)", 0, 50, 30)
+humidity = st.sidebar.slider("Humidity (%)", 0, 100, 60)
+
+# Fixed sensor defaults (hidden)
+Ax, Ay, Az = 0.4, 0.5, 0.6
+Gx, Gy, Gz = 0.2, 0.2, 0.1
 
 # =========================================================
-# INPUTS
-# =========================================================
-st.subheader("📡 Raw IoT Sensor Data")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    speed = st.slider("Speed (km/h)", 5.0, 100.0, preset_speed)
-    front_distance = st.slider("Front Distance (m)", 0.5, 50.0, preset_front_distance)
-    back_distance = st.slider("Back Distance (m)", 0.5, 50.0, 8.0)
-    jerk = st.slider("Jerk", 0.0, 1.5, preset_jerk)
-
-with col2:
-    temperature = st.slider("Temperature (°C)", 0.0, 50.0, 30.0)
-    humidity = st.slider("Humidity (%)", 0.0, 100.0, 60.0)
-    latitude = st.number_input("Vehicle Latitude", value=13.0827)
-    longitude = st.number_input("Vehicle Longitude", value=80.2707)
-
-# Fixed sensor defaults
-Ax, Ay, Az = 0.3, 0.4, 0.5
-Gx, Gy, Gz = 0.1, 0.1, 0.1
-
-# =========================================================
-# API CALL
+# API CALL FUNCTION
 # =========================================================
 def call_api():
     payload = {
@@ -105,105 +75,95 @@ def call_api():
         "jerk": jerk,
         "temperature": temperature,
         "humidity": humidity,
-        "latitude": latitude,
-        "longitude": longitude,
-        "source": source,
-        "destination": destination
+        "source_lat": source_lat,
+        "source_lon": source_lon,
+        "dest_lat": dest_lat,
+        "dest_lon": dest_lon
     }
 
-    response = requests.post(API_URL, json=payload, timeout=5)
+    response = requests.post(API_URL, json=payload, timeout=10)
     response.raise_for_status()
     return response.json()
 
 # =========================================================
-# BUTTON CONTROLS
+# ACTION BUTTON
 # =========================================================
-predict_clicked = st.button("🚀 Find Optimized Route")
+if st.button("🚀 Find Optimized Route"):
 
-# Session state init
-if "last_run" not in st.session_state:
-    st.session_state.last_run = 0
-if "result" not in st.session_state:
-    st.session_state.result = None
-
-# =========================================================
-# SAFE AUTO-REFRESH (NO WHILE LOOP)
-# =========================================================
-current_time = time.time()
-
-if simulate and source != destination:
-    if current_time - st.session_state.last_run >= refresh_rate:
-        st.session_state.result = call_api()
-        st.session_state.last_run = current_time
-        st.experimental_rerun()
-
-elif predict_clicked and source != destination:
-    st.session_state.result = call_api()
-
-# =========================================================
-# DISPLAY RESULTS
-# =========================================================
-if st.session_state.result:
-
-    result = st.session_state.result
+    with st.spinner("Computing optimal route on real city map..."):
+        result = call_api()
 
     st.divider()
-    st.subheader("📊 Optimized Route Result")
 
-    c1, c2, c3, c4 = st.columns(4)
+    # =====================================================
+    # METRICS
+    # =====================================================
+    c1, c2, c3 = st.columns(3)
 
     c1.metric("Traffic Level", result["traffic_status"])
     c2.metric("Confidence", f"{result['confidence_percent']} %")
-    c3.metric("Total Distance", f"{result['total_distance_km']} km")
-    c4.metric("ETA", f"{result['eta_minutes']} min")
+    c3.metric("ETA", f"{result['eta_minutes']} min")
 
-    # =====================================================
-    # MAP WITH ROUTE POLYLINE
-    # =====================================================
-    st.subheader("🗺️ Optimized Route Map")
-
-    polyline = result["polyline"]
-
-    m = folium.Map(
-        location=polyline[0],
-        zoom_start=14
+    st.metric(
+        "Total Distance",
+        f"{result['total_distance_km']} km"
     )
 
-    # Draw route polyline
+    # =====================================================
+    # MAP VISUALIZATION
+    # =====================================================
+    st.subheader("🗺️ Optimized Route (Real Roads)")
+
+    polyline = result["route_polyline"]
+
+    # Map centered at source
+    m = folium.Map(
+        location=polyline[0],
+        zoom_start=14,
+        control_scale=True
+    )
+
+    # Route polyline
     folium.PolyLine(
         polyline,
         color="blue",
         weight=6,
+        opacity=0.9,
         tooltip="Optimized Route"
     ).add_to(m)
 
-    # Start & End markers
+    # Source marker
     folium.Marker(
         polyline[0],
-        icon=folium.Icon(color="green"),
-        tooltip="Source"
+        tooltip="Source",
+        icon=folium.Icon(color="green", icon="play")
     ).add_to(m)
 
+    # Destination marker
     folium.Marker(
         polyline[-1],
-        icon=folium.Icon(color="red"),
-        tooltip="Destination"
+        tooltip="Destination",
+        icon=folium.Icon(color="red", icon="stop")
     ).add_to(m)
 
     # Vehicle marker
     folium.Marker(
-        [latitude, longitude],
-        icon=folium.Icon(color="orange"),
-        tooltip="Vehicle"
+        [source_lat, source_lon],
+        tooltip="Vehicle Location",
+        icon=folium.Icon(color="orange", icon="car")
     ).add_to(m)
 
-    st_folium(m, width=900, height=500)
+    st_folium(m, width=1000, height=550)
 
     # =====================================================
-    # PATH DETAILS
+    # RAW OUTPUT (OPTIONAL – FOR DEBUG / VIVA)
     # =====================================================
-    st.subheader("🧭 Path Nodes")
-    st.write(" → ".join(result["optimized_path"]))
+    with st.expander("🔍 API Response (Debug / Viva)"):
+        st.json(result)
 
-elif source == destination:
-    st.warning("Source and destination must be different.")
+# =========================================================
+# FOOTER
+# =========================================================
+st.caption(
+    "Built using FastAPI, Streamlit, OpenStreetMap (OSMnx), and Machine Learning"
+)

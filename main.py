@@ -3,14 +3,16 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import joblib
-import heapq
+
+import osmnx as ox
+import networkx as nx
 
 # =========================================================
 # APP
 # =========================================================
 app = FastAPI(
-    title="Smart Traffic Management System",
-    version="3.0"
+    title="Smart Traffic Route Optimization (Real Map)",
+    version="4.1"
 )
 
 # =========================================================
@@ -21,27 +23,14 @@ scaler = joblib.load("scaler.pkl")
 feature_names = joblib.load("feature_names.pkl")
 
 # =========================================================
-# GPS NODES (REAL LOCATIONS)
+# GLOBAL GRAPH (LAZY LOADED)
 # =========================================================
-NODES = {
-    "A": (13.0827, 80.2707),
-    "B": (13.0850, 80.2750),
-    "C": (13.0900, 80.2700),
-    "D": (13.0950, 80.2650),
-    "E": (13.1000, 80.2600)
-}
+ROAD_GRAPH = None
+CITY_NAME = "Chennai, India"
 
 # =========================================================
-# ROAD GRAPH (DISTANCE IN KM)
+# TRAFFIC MULTIPLIERS
 # =========================================================
-GRAPH = {
-    "A": {"B": 2.0, "C": 3.5},
-    "B": {"A": 2.0, "C": 1.5, "D": 4.0},
-    "C": {"A": 3.5, "B": 1.5, "D": 2.5},
-    "D": {"B": 4.0, "C": 2.5, "E": 3.0},
-    "E": {"D": 3.0}
-}
-
 TRAFFIC_WEIGHT = {
     0: 1.0,
     1: 1.3,
@@ -65,15 +54,31 @@ class RawSensorInput(BaseModel):
     jerk: float
     temperature: float
     humidity: float
-    latitude: float
-    longitude: float
-    source: str
-    destination: str
+
+    source_lat: float
+    source_lon: float
+    dest_lat: float
+    dest_lon: float
+
+# =========================================================
+# LOAD GRAPH (ON DEMAND)
+# =========================================================
+def get_graph():
+    global ROAD_GRAPH
+    if ROAD_GRAPH is None:
+        print("Loading real city road network...")
+        ROAD_GRAPH = ox.graph_from_place(
+            CITY_NAME,
+            network_type="drive",
+            simplify=True
+        )
+        print("Road network loaded")
+    return ROAD_GRAPH
 
 # =========================================================
 # FEATURE ENGINEERING
 # =========================================================
-def engineer_features(raw):
+def engineer_features(raw: RawSensorInput):
     df = pd.DataFrame([{
         "speed(km/h)": raw.speed,
         "Ax(m/s2)": raw.Ax,
@@ -87,8 +92,8 @@ def engineer_features(raw):
         "jerk": raw.jerk,
         "temperature(°C)": raw.temperature,
         "humidity(%)": raw.humidity,
-        "latitude": raw.latitude,
-        "longitude": raw.longitude
+        "latitude": raw.source_lat,
+        "longitude": raw.source_lon
     }])
 
     df["acc_magnitude"] = np.sqrt(
@@ -99,7 +104,9 @@ def engineer_features(raw):
         df["Gx(rad/s)"]**2 + df["Gy(rad/s)"]**2 + df["Gz(rad/s)"]**2
     )
 
-    df["speed_distance_ratio"] = df["speed(km/h)"] / (df["front_distance(m)"] + 1)
+    df["speed_distance_ratio"] = (
+        df["speed(km/h)"] / (df["front_distance(m)"] + 1)
+    )
 
     for col in feature_names:
         if col not in df.columns:
@@ -108,37 +115,12 @@ def engineer_features(raw):
     return df[feature_names]
 
 # =========================================================
-# DIJKSTRA (TRAFFIC-AWARE)
-# =========================================================
-def dijkstra(start, end, traffic_status):
-    pq = [(0, start, [])]
-    visited = set()
-
-    while pq:
-        cost, node, path = heapq.heappop(pq)
-
-        if node in visited:
-            continue
-
-        visited.add(node)
-        path = path + [node]
-
-        if node == end:
-            return cost, path
-
-        for neigh, dist in GRAPH[node].items():
-            if neigh not in visited:
-                weighted = dist * TRAFFIC_WEIGHT[traffic_status]
-                heapq.heappush(pq, (cost + weighted, neigh, path))
-
-    return float("inf"), []
-
-# =========================================================
 # API ENDPOINT
 # =========================================================
 @app.post("/optimized_route")
 def optimized_route(data: RawSensorInput):
 
+    # ---- ML Traffic Prediction ----
     features = engineer_features(data)
     scaled = scaler.transform(features)
 
@@ -146,26 +128,50 @@ def optimized_route(data: RawSensorInput):
     traffic_status = int(np.argmax(probs))
     confidence = round(float(np.max(probs)) * 100, 2)
 
-    total_cost, path = dijkstra(data.source, data.destination, traffic_status)
+    traffic_multiplier = TRAFFIC_WEIGHT[traffic_status]
 
-    # Total distance
-    total_distance = sum(
-        GRAPH[path[i]][path[i+1]] for i in range(len(path)-1)
+    # ---- Load Graph ----
+    graph = get_graph()
+
+    # ---- Nearest Nodes ----
+    source_node = ox.nearest_nodes(
+        graph, data.source_lon, data.source_lat
+    )
+    dest_node = ox.nearest_nodes(
+        graph, data.dest_lon, data.dest_lat
     )
 
+    # ---- Shortest Path (Dijkstra) ----
+    path_nodes = nx.shortest_path(
+        graph,
+        source_node,
+        dest_node,
+        weight="length"
+    )
+
+    # ---- Path Polyline ----
+    polyline = [
+        (graph.nodes[n]["y"], graph.nodes[n]["x"])
+        for n in path_nodes
+    ]
+
+    # ---- Distance ----
+    total_distance_km = sum(
+        graph.edges[path_nodes[i], path_nodes[i+1], 0]["length"]
+        for i in range(len(path_nodes) - 1)
+    ) / 1000
+
+    # ---- ETA ----
     eta_minutes = round(
-        (total_distance / max(data.speed, 5)) *
-        TRAFFIC_WEIGHT[traffic_status] * 60,
+        (total_distance_km / max(data.speed, 5)) *
+        traffic_multiplier * 60,
         2
     )
-
-    polyline = [NODES[node] for node in path]
 
     return {
         "traffic_status": traffic_status,
         "confidence_percent": confidence,
-        "optimized_path": path,
-        "polyline": polyline,
-        "total_distance_km": round(total_distance, 2),
-        "eta_minutes": eta_minutes
+        "total_distance_km": round(total_distance_km, 2),
+        "eta_minutes": eta_minutes,
+        "route_polyline": polyline
     }
